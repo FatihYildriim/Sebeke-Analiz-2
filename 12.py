@@ -124,6 +124,10 @@ def calculate_ahf_rating(harmonics, I_nominal, ahf_percentage=30):
 
 # Rezonans riski hesaplama
 def calculate_resonance_risk(Q_c, S_sc, f_nominal=50):
+    # Q_c sıfır ise rezonans riski yok
+    if Q_c <= 0:
+        return False, 0, None
+    
     # Paralel rezonans frekansı
     f_resonance = f_nominal * np.sqrt(S_sc / Q_c)
     
