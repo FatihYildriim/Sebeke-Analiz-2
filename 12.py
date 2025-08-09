@@ -122,14 +122,70 @@ def calculate_ahf_rating(harmonics, I_nominal, ahf_percentage=30):
     
     return min(I_harmonic_total, ahf_current_capacity)
 
-# Rezonans riski hesaplama
-def calculate_resonance_risk(Q_c, S_sc, f_nominal=50):
+# Reaktif güç bozulması hesaplama
+def calculate_distortion_reactive_power(harmonics, apparent_power, thdi):
+    """
+    Harmoniklerin neden olduğu reaktif güç bozulmasını hesaplar.
+    Bu, harmoniklerin neden olduğu ek reaktif güç bileşenidir.
+    """
+    if not harmonics or apparent_power <= 0:
+        return 0.0
+    
+    # Temel güç faktörü (cosφ) olmadan harmoniklerin neden olduğu reaktif güç
+    # Bu, harmoniklerin faz kaymasından bağımsız olarak neden olduğu reaktif güç bileşenidir
+    
+    # Harmonik reaktif güç hesaplama
+    harmonic_reactive_power = 0.0
+    
+    for h in harmonics:
+        # Her harmonik için reaktif güç katkısı
+        # Harmonik sırası arttıkça reaktif güç etkisi artar
+        harmonic_factor = h['order'] * (h['percentage'] / 100)
+        harmonic_reactive_power += apparent_power * harmonic_factor * 0.1  # Ağırlık faktörü
+    
+    # THDi'den gelen ek reaktif güç
+    thdi_reactive_power = apparent_power * (thdi / 100) * 0.3
+    
+    total_distortion_reactive = harmonic_reactive_power + thdi_reactive_power
+    
+    return total_distortion_reactive
+
+# Detune reaktör etkisi hesaplama
+def calculate_detune_effect(detune_type, frequency=50):
+    """
+    Detune reaktörün rezonans frekansına etkisini hesaplar
+    """
+    if detune_type == "Yok":
+        return 1.0, 0  # Etki yok
+    
+    # Detune reaktör alt kırınım oranları
+    detune_ratios = {
+        "P5": 4.85,   # 242.5 Hz @ 50 Hz
+        "P7": 6.85,   # 342.5 Hz @ 50 Hz
+        "P11": 10.85, # 542.5 Hz @ 50 Hz
+        "P13": 12.85  # 642.5 Hz @ 50 Hz
+    }
+    
+    if detune_type in detune_ratios:
+        detune_ratio = detune_ratios[detune_type]
+        detune_frequency = frequency * detune_ratio
+        return detune_ratio, detune_frequency
+    
+    return 1.0, 0
+
+def calculate_resonance_risk(Q_c, S_sc, f_nominal=50, detune_type="Yok"):
     # Q_c sıfır ise rezonans riski yok
     if Q_c <= 0:
-        return False, 0, None
+        return False, 0, None, 0
+    # Detune reaktör etkisi
+    detune_ratio, detune_freq = calculate_detune_effect(detune_type, f_nominal)
     
-    # Paralel rezonans frekansı
-    f_resonance = f_nominal * np.sqrt(S_sc / Q_c)
+    # Paralel rezonans frekansı (detune etkisi ile)
+    if detune_type != "Yok":
+        # Detune reaktör varsa rezonans frekansı değişir
+        f_resonance = f_nominal * np.sqrt(S_sc / Q_c) * detune_ratio
+    else:
+        f_resonance = f_nominal * np.sqrt(S_sc / Q_c)
     
     # Harmonik sıraları
     harmonic_orders = [3, 5, 7, 11, 13, 17, 19, 23, 25]
@@ -146,7 +202,51 @@ def calculate_resonance_risk(Q_c, S_sc, f_nominal=50):
             closest_harmonic = harmonic_orders[i]
             break
     
-    return resonance_risk, f_resonance, closest_harmonic
+    return resonance_risk, f_resonance, closest_harmonic, detune_freq
+
+# Filtre etkinliği hesaplama
+def calculate_filter_effectiveness(filter_type, filter_harmonic_type, harmonics):
+    """
+    Filtre tipine ve harmonik tipine göre etkinlik hesaplar
+    """
+    effectiveness = {}
+    
+    if filter_type == "Yok":
+        for h in harmonics:
+            effectiveness[h['order']] = 1.0  # Etki yok
+        return effectiveness
+    
+    # Filtre harmonik tipine göre etkinlik
+    target_harmonics = []
+    if filter_harmonic_type == "Geniş Bant":
+        target_harmonics = [3, 5, 7, 11, 13, 17, 19, 23, 25]
+    elif filter_harmonic_type == "3. Harmonik":
+        target_harmonics = [3]
+    elif filter_harmonic_type == "5. Harmonik":
+        target_harmonics = [5]
+    elif filter_harmonic_type == "7. Harmonik":
+        target_harmonics = [7]
+    elif filter_harmonic_type == "11. Harmonik":
+        target_harmonics = [11]
+    elif filter_harmonic_type == "13. Harmonik":
+        target_harmonics = [13]
+    
+    # Filtre tipine göre etkinlik faktörü
+    if filter_type == "Pasif Filtre":
+        base_reduction = 0.7  # %70 azalma
+    elif filter_type == "Aktif Filtre":
+        base_reduction = 0.3  # %30 azalma (daha etkili)
+    else:
+        base_reduction = 1.0
+    
+    # Her harmonik için etkinlik hesaplama
+    for h in harmonics:
+        if h['order'] in target_harmonics:
+            effectiveness[h['order']] = base_reduction
+        else:
+            effectiveness[h['order']] = 1.0  # Hedeflenmeyen harmonikler
+    
+    return effectiveness
 
 # Tekil limit uyumu raporu
 def generate_harmonic_compliance_report(harmonics, filter_reduction):
@@ -167,6 +267,18 @@ def generate_harmonic_compliance_report(harmonics, filter_reduction):
         })
     
     return compliance_table
+
+# Kondansatör durumuna göre reaktif güç hesaplama
+def calculate_effective_reactive_power(existing_q, capacitor_status, detune_type):
+    """
+    Kondansatör durumuna göre etkili reaktif güç hesaplar
+    """
+    if capacitor_status == "Kapalı":
+        return 0.0
+    elif capacitor_status == "Kısmi":
+        return existing_q * 0.5  # %50 etkili
+    else:  # Açık
+        return existing_q
 
 # SVG vs AHF ayrımı
 def determine_solution_type(pf_gap, thdi, load_dynamics="Orta"):
@@ -265,6 +377,10 @@ with st.form("input_form"):
             "Reaktif Güç (kVAR)", min_value=0.0, 
             help="Ölçülen reaktif güç (kVAR)."
         )
+        drawn_current = st.number_input(
+            "İşletmenin Çekilen Akım (A)", min_value=0.0, 
+            help="İşletmenin şebekeden çektiği toplam akım değeri (A)."
+        )
         reactive_type = st.selectbox(
             "Reaktif Güç Tipi", ["Endüktif", "Kapasitif"],
             help="Reaktif gücün endüktif mi kapasitif mi olduğunu seçin."
@@ -299,21 +415,55 @@ with st.form("input_form"):
             "Nötr-Topraklama Voltajı (V)", min_value=0.0, format="%.1f",
             help="Tesisinizdeki nötr–toprak potansiyel farkı (V)."
         )
+        frequency = st.number_input(
+            "Şebeke Frekansı (Hz)", min_value=45.0, max_value=65.0, value=50.0, step=0.1,
+            help="Şebekenin frekans değeri (Hz). Türkiye'de genellikle 50 Hz."
+        )
 
 
     st.subheader("🔌 Mevcut Kompanzasyon (Opsiyonel)")
+    
+    # Kondansatör durumu
+    capacitor_status = st.selectbox(
+        "Kondansatör Durumu",
+        ["Açık", "Kapalı", "Kısmi"],
+        key="capacitor_status",
+        help="Kondansatör bankalarının mevcut durumu"
+    )
+    
     existing_q = st.number_input(
         "Toplam Kapasitif Reaktif Güç (kVAr)",
         min_value=0.0, step=1.0, format="%.1f",
         key="existing_q",
         help="Sisteme şu anda bağlı kondansatör bankalarının toplam reaktif gücü"
     )
+    
+    # Detune reaktör bilgileri
+    detune_type = st.selectbox(
+        "Detune Reaktör Tipi",
+        ["Yok", "P5", "P7", "P11", "P13"],
+        key="detune_type",
+        help="Kondansatörlerde kullanılan detune reaktör tipi"
+    )
+    
     filter_type = st.selectbox(
         "Filtre Türü",
         ["Yok", "Pasif Filtre", "Aktif Filtre"],
         key="filter_type",
         help="Varsa sisteminizdeki filtre teknolojisi"
     )
+    
+    # Filtre harmonik tipi (sadece filtre varsa göster)
+    if filter_type != "Yok":
+        filter_harmonic_type = st.selectbox(
+            "Filtre Harmonik Tipi",
+            ["Geniş Bant", "3. Harmonik", "5. Harmonik", "7. Harmonik", "11. Harmonik", "13. Harmonik"],
+            key="filter_harmonic_type",
+            help="Filtrenin hedeflediği harmonik sırası"
+        )
+    else:
+        filter_harmonic_type = "Yok"
+    
     filter_q = st.number_input(
         "Filtre Reaktif Gücü (kVAr)",
         min_value=0.0, step=1.0, format="%.1f",
@@ -354,7 +504,7 @@ with st.form("input_form"):
 
     
     st.subheader("Harmonik Girişi")
-    st.info("Harmonik yüzdeleri temel akım bileşenine göre verilmelidir.")
+    st.info(f"Harmonik yüzdeleri temel akım bileşenine göre verilmelidir. Şebeke frekansı: {frequency} Hz")
     harmonic_count = st.number_input(
         "Harmonik Sayısı", min_value=0, max_value=25, step=1,
         help="Girmek istediğiniz harmonik bileşen sayısı."
@@ -411,6 +561,7 @@ if submitted:
             "total_power": total_power,
             "active_power": active_power,
             "reactive_power": reactive_power,
+            "drawn_current": drawn_current,
             "reactive_type": reactive_type,
             "cosphi": cosphi,
             "target_pf": target_pf,
@@ -419,7 +570,12 @@ if submitted:
             "harmonics": harmonics,
             "transformer_rating": transformer_rating,
             "breaker_rating": breaker_rating,
-            "ng_voltage": ng_voltage
+            "ng_voltage": ng_voltage,
+            "frequency": frequency,
+            "capacitor_status": capacitor_status,
+            "detune_type": detune_type,
+            "filter_type": filter_type,
+            "filter_harmonic_type": filter_harmonic_type
 
         }
     else:
@@ -431,6 +587,7 @@ if submitted:
             "total_power": total_power,
             "active_power": active_power,
             "reactive_power": reactive_power,
+            "drawn_current": drawn_current,
             "reactive_type": reactive_type,
             "cosphi": cosphi,
             "target_pf": target_pf,
@@ -439,7 +596,12 @@ if submitted:
             "harmonics": harmonics,
             "transformer_rating": transformer_rating,
             "breaker_rating": breaker_rating,
-            "ng_voltage": ng_voltage
+            "ng_voltage": ng_voltage,
+            "frequency": frequency,
+            "capacitor_status": capacitor_status,
+            "detune_type": detune_type,
+            "filter_type": filter_type,
+            "filter_harmonic_type": filter_harmonic_type
 
         }
 
@@ -463,13 +625,6 @@ if submitted:
     # Matematiksel tutarlılık
     apparent_power = np.sqrt(active_power**2 + reactive_power**2)
     distortion_power = apparent_power * (thdi / 100)
-    calculated_cosphi = active_power / apparent_power if apparent_power > 0 else 0
-    
-    # ±%3 tolerans
-    if apparent_power > 0 and abs(calculated_cosphi - cosphi) > 0.03:
-        errors.append(
-            f"Girilen cosφ ({cosphi:.2f}) hesaplanan değerle ({calculated_cosphi:.2f}) uyuşmuyor."
-        )
 
     # Üç faz dengesizlik kontrolü
     if phase_type == "Üç Fazlı":
@@ -553,10 +708,16 @@ if submitted:
     Q_c_total = st.session_state.get("existing_q", 0.0) + st.session_state.get("filter_q", 0.0)
     S_sc = 100.0  # Varsayılan kısa devre gücü (MVA)
     
-    resonance_risk, f_resonance, closest_harmonic = calculate_resonance_risk(Q_c_total, S_sc)
+    # Detune reaktör bilgisi
+    detune_type = st.session_state.get("detune_type", "Yok")
+    
+    resonance_risk, f_resonance, closest_harmonic, detune_freq = calculate_resonance_risk(Q_c_total, S_sc, frequency, detune_type)
     
     if resonance_risk:
-        warnings.append(f"Rezonans riski: {f_resonance:.0f} Hz ≈ {closest_harmonic}. harmonik")
+        if detune_type != "Yok":
+            warnings.append(f"Rezonans riski: {f_resonance:.0f} Hz ≈ {closest_harmonic}. harmonik ({frequency} Hz şebeke, {detune_type} detune)")
+        else:
+            warnings.append(f"Rezonans riski: {f_resonance:.0f} Hz ≈ {closest_harmonic}. harmonik ({frequency} Hz şebeke)")
 
     # Hata ve uyarıları göster
     if errors:
@@ -610,11 +771,11 @@ if submitted:
     
     if harmonic_issue:
         if solution_type in ["AHF", "SVG + AHF"]:
-            # AHF boyutlandırması
-            ahf_rating = calculate_ahf_rating(harmonics, I_avg_sys, 30)
+            # AHF boyutlandırması - işletmenin çekilen akımını kullan
+            ahf_rating = calculate_ahf_rating(harmonics, drawn_current, 30)
             solutions.append({
                 "name": f"Aktif Filtre ({ahf_rating:.1f}A)",
-                "reason": f"Tüm harmonik sıraları için etkili çözüm - {ahf_rating:.1f}A kapasite",
+                "reason": f"Tüm harmonik sıraları için etkili çözüm - {ahf_rating:.1f}A kapasite (İşletme akımı: {drawn_current:.1f}A)",
                 "suitability": 5,
                 "score": system_score * 0.9
             })
@@ -646,17 +807,28 @@ if submitted:
     phi1 = np.arccos(clamp(cosphi, 1e-6, 1)) if cosphi > 0 else 0.0
     phi2 = np.arccos(clamp(target_pf, 1e-6, 1)) if target_pf > 0 else 0.0
     Q_target = active_power * np.tan(phi2)
+    
+    # Harmonik reaktif güç bozulması hesaplama
+    Q_distortion = calculate_distortion_reactive_power(harmonics, apparent_power, thdi)
+    
     # Endüktif yük için gereken kapasitif kVAr: P*(tan phi1 - tan phi2)
+    # Harmonik reaktif güç bozulmasını da dahil et
+    Q_total_with_distortion = reactive_power + Q_distortion
+    
     if target_pf <= cosphi:
         Q_required_theoretical = 0.0
         pf_issue = False
     else:
-        Q_required_theoretical = max(0.0, active_power * (np.tan(phi1) - np.tan(phi2)))
+        # Temel reaktif güç + harmonik bozulma dikkate alınarak hesaplama
+        Q_required_theoretical = max(0.0, active_power * (np.tan(phi1) - np.tan(phi2)) + Q_distortion)
 
-    # Mevcut ekipmanın etkisi
-    existing = st.session_state.existing_q if "existing_q" in st.session_state else 0.0
+    # Mevcut ekipmanın etkisi (kondansatör durumuna göre)
+    capacitor_status = st.session_state.get("capacitor_status", "Açık")
+    existing_q = st.session_state.get("existing_q", 0.0)
+    effective_existing_q = calculate_effective_reactive_power(existing_q, capacitor_status, detune_type)
+    
     filter_q_val = st.session_state.filter_q if "filter_q" in st.session_state else 0.0
-    Q_comp = max(0.0, Q_required_theoretical - existing - filter_q_val)
+    Q_comp = max(0.0, Q_required_theoretical - effective_existing_q - filter_q_val)
 
     # Adım / konfigürasyon önerisi
     steps_count = max(1, int(st.session_state.get("bank_steps", 3)))
@@ -666,38 +838,26 @@ if submitted:
 
     
     # Harmonik filtrasyon etkisi (dinamik)
-    order_reduction = {}
     S_nonzero = apparent_power if apparent_power > 0 else 1.0
+    
+    # Filtre bilgilerini al
+    filter_type = st.session_state.get("filter_type", "Yok")
+    filter_harmonic_type = st.session_state.get("filter_harmonic_type", "Yok")
+    
+    # Filtre etkinliğini hesapla
+    order_reduction = calculate_filter_effectiveness(filter_type, filter_harmonic_type, harmonics)
+    
     # Simülasyon için, kullanıcı filtre seçmemişse fakat harmonik sorunu varsa
     # önerilen çözüm varsayımıyla (Aktif Filtre) etkiyi göster.
-    sim_filter_type = st.session_state.get("filter_type", "Yok")
+    sim_filter_type = filter_type
     sim_filter_q = st.session_state.get("filter_q", 0.0)
     if sim_filter_type == "Yok" and harmonic_issue:
         sim_filter_type = "Aktif Filtre"
         # kaba boyutlandırma: S'nin %20-40'ı aralığında hedefle
         sim_filter_q = max(sim_filter_q, 0.3 * S_nonzero)
-
-    sizing_ratio = clamp((sim_filter_q) / S_nonzero, 0.0, 1.0)
-    if sim_filter_type == "Yok":
-        for h in HARMONIC_LIMITS:
-            order_reduction[h] = 1.0
-    elif sim_filter_type == "Pasif Filtre":
-        base = 1.0 - 0.6 * sizing_ratio
-        for h in HARMONIC_LIMITS:
-            if h in [3, 5, 7]:
-                order_reduction[h] = clamp(base, 0.3, 1.0)
-            elif h in [11, 13]:
-                order_reduction[h] = clamp(base + 0.2, 0.5, 1.0)
-            else:
-                order_reduction[h] = clamp(0.9, 0.5, 1.0)
-    else:  # Aktif Filtre
-        # Daha agresif model: oran 0.3 için ~%60 düşüş, 0.5 için alt sınır
-        base = 1.0 - 2.0 * sizing_ratio
-        for h in HARMONIC_LIMITS:
-            order_reduction[h] = clamp(base, 0.2, 1.0)
     
     # Simülasyon
-    f = 50  # Hz
+    f = frequency  # Kullanıcı girişi
     t = np.linspace(0, 0.04, 1000)  # 2 periyot
     # RMS hesaplama
     if phase_type == "Üç Fazlı":
@@ -759,6 +919,20 @@ if submitted:
     st.markdown(f"- Gerekli kompanzasyon: ~**{Q_comp:.1f} kVAr**")
     st.markdown(f"- Konfigürasyon: **{config_text}**")
     st.markdown(f"- Hedef PF: **{cosphi:.2f} → {target_pf:.2f}**")
+    if Q_distortion > 0:
+        st.markdown(f"- Harmonik reaktif güç bozulması: **{Q_distortion:.1f} kVAr**")
+        st.markdown(f"- Toplam reaktif güç (temel + bozulma): **{reactive_power + Q_distortion:.1f} kVAr**")
+    
+    # Mevcut kompanzasyon durumu
+    if capacitor_status != "Kapalı":
+        st.markdown(f"- Mevcut kondansatör: **{effective_existing_q:.1f} kVAr ({capacitor_status})**")
+        if detune_type != "Yok":
+            st.markdown(f"- Detune reaktör: **{detune_type}**")
+    
+    # Filtre bilgileri
+    if filter_type != "Yok":
+        st.markdown(f"- Filtre: **{filter_type} ({filter_harmonic_type})**")
+        st.markdown(f"- Filtre gücü: **{filter_q_val:.1f} kVAr**")
 
     st.subheader("Harmonik Analiz")
     if harmonic_violations:
@@ -766,6 +940,8 @@ if submitted:
     else:
         st.markdown("- IEC limitleri: **Uygun**")
     st.markdown(f"- THDi: **{thdi:.1f}% → {thdi_after:.1f}% (tahmini)**")
+    if Q_distortion > 0:
+        st.markdown(f"- Reaktif güç bozulması: **{Q_distortion:.1f} kVAr ({Q_distortion/apparent_power*100:.1f}% of S)**")
     if phase_type == "Üç Fazlı":
         st.markdown(f"- Nötr akımı: **{calculated_i_neutral:.1f} A ({neutral_pct:.1f}%)**")
 
